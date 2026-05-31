@@ -1,0 +1,7 @@
+## Interface: 11200
+## Title: SoulstoneTracker
+## Notes: Tracks the active Soulstone Resurrection applied by the player.
+## Author: Ravenhost
+## Version: 0.1.0
+## SavedVariablesPerCharacter: SoulstoneTrackerDB
+SoulstoneTracker.lua
