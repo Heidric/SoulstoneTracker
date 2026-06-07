@@ -13,6 +13,7 @@ SuperWoW + SuperAPI are recommended.
 /sst unlock
 /sst show
 /sst hide
+/sst reset
 /sst scale 1.2
 /sst test TargetName 120
 ```

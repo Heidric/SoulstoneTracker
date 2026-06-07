@@ -1,12 +1,18 @@
 local SST_ADDON_NAME = "SoulstoneTracker"
-local SST_VERSION = "0.1.0"
+local SST_VERSION = "0.1.1"
 local SST_DURATION_SECONDS = 1800
 local SST_WARN_FIVE_SECONDS = 300
 local SST_WARN_ONE_SECONDS = 60
+local SST_FRAME_WIDTH = 220
+local SST_FRAME_HEIGHT = 28
+local SST_DEFAULT_X = 0
+local SST_DEFAULT_Y = 120
+local SST_SCREEN_PADDING = 12
 
 local SST = {}
 local SST_Frame = CreateFrame("Frame", "SoulstoneTrackerFrame", UIParent)
 local SST_Text = nil
+local SST_UpdateText = nil
 local SST_Pending = nil
 local SST_LastUpdate = 0
 local SST_OriginalSpellTargetUnit = nil
@@ -60,6 +66,76 @@ local function SST_FormatTime(seconds)
     return minutes .. ":" .. remainingSeconds
 end
 
+local function SST_Clamp(value, minValue, maxValue)
+    if value < minValue then
+        return minValue
+    end
+
+    if value > maxValue then
+        return maxValue
+    end
+
+    return value
+end
+
+local function SST_GetSafeScale(value)
+    local scale = tonumber(value)
+    if not scale then
+        return 1
+    end
+
+    if scale < 0.5 then
+        return 0.5
+    end
+
+    if scale > 2 then
+        return 2
+    end
+
+    return scale
+end
+
+local function SST_GetSafePosition(x, y)
+    local safeX = tonumber(x)
+    local safeY = tonumber(y)
+
+    if not safeX or not safeY then
+        return SST_DEFAULT_X, SST_DEFAULT_Y, true
+    end
+
+    if not UIParent or not UIParent.GetWidth or not UIParent.GetHeight then
+        return safeX, safeY, false
+    end
+
+    local parentWidth = UIParent:GetWidth()
+    local parentHeight = UIParent:GetHeight()
+
+    if not parentWidth or not parentHeight or parentWidth <= 0 or parentHeight <= 0 then
+        return safeX, safeY, false
+    end
+
+    local scale = 1
+    if SoulstoneTrackerDB then
+        scale = SST_GetSafeScale(SoulstoneTrackerDB.scale)
+    end
+
+    local maxX = (parentWidth / 2) - ((SST_FRAME_WIDTH * scale) / 2) - SST_SCREEN_PADDING
+    local maxY = (parentHeight / 2) - ((SST_FRAME_HEIGHT * scale) / 2) - SST_SCREEN_PADDING
+
+    if maxX < 0 then
+        maxX = 0
+    end
+
+    if maxY < 0 then
+        maxY = 0
+    end
+
+    local clampedX = SST_Clamp(safeX, -maxX, maxX)
+    local clampedY = SST_Clamp(safeY, -maxY, maxY)
+
+    return clampedX, clampedY, clampedX ~= safeX or clampedY ~= safeY
+end
+
 local function SST_TableHasSoulstoneSpellID(value)
     local id = tonumber(value)
     if id and SST_SOULSTONE_SPELL_IDS[id] then
@@ -90,9 +166,7 @@ local function SST_InitDB()
         SoulstoneTrackerDB.locked = false
     end
 
-    if not SoulstoneTrackerDB.scale then
-        SoulstoneTrackerDB.scale = 1
-    end
+    SoulstoneTrackerDB.scale = SST_GetSafeScale(SoulstoneTrackerDB.scale)
 
     if SoulstoneTrackerDB.warnFive == nil then
         SoulstoneTrackerDB.warnFive = true
@@ -101,6 +175,8 @@ local function SST_InitDB()
     if SoulstoneTrackerDB.warnOne == nil then
         SoulstoneTrackerDB.warnOne = true
     end
+
+    SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
 end
 
 local function SST_SavePosition()
@@ -112,18 +188,24 @@ local function SST_SavePosition()
     local ux, uy = UIParent:GetCenter()
 
     if x and y and ux and uy then
-        SoulstoneTrackerDB.x = x - ux
-        SoulstoneTrackerDB.y = y - uy
+        local safeX, safeY = SST_GetSafePosition(x - ux, y - uy)
+        SoulstoneTrackerDB.x = safeX
+        SoulstoneTrackerDB.y = safeY
+        return
     end
+
+    SoulstoneTrackerDB.x = SST_DEFAULT_X
+    SoulstoneTrackerDB.y = SST_DEFAULT_Y
 end
 
 local function SST_ApplyPosition()
     SST_Frame:ClearAllPoints()
 
     if SoulstoneTrackerDB and SoulstoneTrackerDB.x and SoulstoneTrackerDB.y then
+        SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
         SST_Frame:SetPoint("CENTER", UIParent, "CENTER", SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
     else
-        SST_Frame:SetPoint("CENTER", UIParent, "CENTER", 0, 120)
+        SST_Frame:SetPoint("CENTER", UIParent, "CENTER", SST_DEFAULT_X, SST_DEFAULT_Y)
     end
 end
 
@@ -132,7 +214,8 @@ local function SST_ApplyFrameState()
         return
     end
 
-    SST_Frame:SetScale(SoulstoneTrackerDB.scale or 1)
+    SoulstoneTrackerDB.scale = SST_GetSafeScale(SoulstoneTrackerDB.scale)
+    SST_Frame:SetScale(SoulstoneTrackerDB.scale)
     SST_Frame:EnableMouse(not SoulstoneTrackerDB.locked)
 
     if SoulstoneTrackerDB.visible then
@@ -140,6 +223,22 @@ local function SST_ApplyFrameState()
     else
         SST_Frame:Hide()
     end
+end
+
+local function SST_ResetFrame()
+    if not SoulstoneTrackerDB then
+        SoulstoneTrackerDB = {}
+    end
+
+    SoulstoneTrackerDB.visible = true
+    SoulstoneTrackerDB.locked = false
+    SoulstoneTrackerDB.scale = 1
+    SoulstoneTrackerDB.x = SST_DEFAULT_X
+    SoulstoneTrackerDB.y = SST_DEFAULT_Y
+
+    SST_ApplyPosition()
+    SST_ApplyFrameState()
+    SST_UpdateText()
 end
 
 local function SST_ResolveUnitName(unit)
@@ -400,7 +499,7 @@ local function SST_FinishPendingCast()
     SST_Pending = nil
 end
 
-local function SST_UpdateText()
+function SST_UpdateText()
     if not SST_Text or not SoulstoneTrackerDB then
         return
     end
@@ -562,9 +661,19 @@ local function SST_OnUpdate()
 end
 
 local function SST_CreateFrame()
-    SST_Frame:SetWidth(220)
-    SST_Frame:SetHeight(28)
+    SST_Frame:SetWidth(SST_FRAME_WIDTH)
+    SST_Frame:SetHeight(SST_FRAME_HEIGHT)
     SST_Frame:SetMovable(true)
+    if SST_Frame.SetClampedToScreen then
+        SST_Frame:SetClampedToScreen(true)
+    end
+    SST_Frame:SetFrameStrata("HIGH")
+    if SST_Frame.SetFrameLevel then
+        SST_Frame:SetFrameLevel(100)
+    end
+    if SST_Frame.SetToplevel then
+        SST_Frame:SetToplevel(true)
+    end
     SST_Frame:RegisterForDrag("LeftButton")
     SST_Frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -589,6 +698,8 @@ local function SST_CreateFrame()
     SST_Frame:SetScript("OnDragStop", function()
         this:StopMovingOrSizing()
         SST_SavePosition()
+        SST_ApplyPosition()
+        SST_ApplyFrameState()
     end)
 
     SST_Frame:SetScript("OnEvent", SST_OnEvent)
@@ -631,7 +742,7 @@ local function SST_NormalizeSlashCommand(message)
 end
 
 local function SST_PrintHelp()
-    SST_Print("commands: /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst scale <value>, /sst test [name] [seconds]")
+    SST_Print("commands: /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst reset, /sst scale <value>, /sst test [name] [seconds]")
 end
 
 local function SST_SlashHandler(message)
@@ -674,6 +785,7 @@ local function SST_SlashHandler(message)
 
     if msg == "show" then
         SoulstoneTrackerDB.visible = true
+        SST_ApplyPosition()
         SST_ApplyFrameState()
         SST_Print("frame shown.")
         return
@@ -686,11 +798,18 @@ local function SST_SlashHandler(message)
         return
     end
 
+    if msg == "reset" or msg == "center" then
+        SST_ResetFrame()
+        SST_Print("frame reset to the screen center.")
+        return
+    end
+
     local _, _, scaleValue = string.find(msg, "^scale%s+([0-9%.]+)$")
     if scaleValue then
         local scale = tonumber(scaleValue)
         if scale and scale >= 0.5 and scale <= 2 then
             SoulstoneTrackerDB.scale = scale
+            SST_ApplyPosition()
             SST_ApplyFrameState()
             SST_Print("scale set to " .. scale .. ".")
         else
