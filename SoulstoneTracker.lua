@@ -1,5 +1,5 @@
 local SST_ADDON_NAME = "SoulstoneTracker"
-local SST_VERSION = "0.1.2"
+local SST_VERSION = "0.1.3"
 local SST_DURATION_SECONDS = 1800
 local SST_WARN_FIVE_SECONDS = 300
 local SST_WARN_ONE_SECONDS = 60
@@ -8,6 +8,8 @@ local SST_FRAME_HEIGHT = 28
 local SST_DEFAULT_X = 0
 local SST_DEFAULT_Y = 120
 local SST_SCREEN_PADDING = 12
+local SST_MIN_VISIBLE_WIDTH = 36
+local SST_MIN_VISIBLE_HEIGHT = 14
 
 local SST = {}
 local SST_Frame = CreateFrame("Frame", "SoulstoneTrackerFrame", UIParent)
@@ -122,7 +124,77 @@ local function SST_GetFrameScale()
     return 1
 end
 
-local function SST_GetSafePosition(x, y)
+local function SST_MaxDimension(currentValue, candidateValue)
+    local current = tonumber(currentValue) or 0
+    local candidate = tonumber(candidateValue) or 0
+
+    if candidate > current then
+        return candidate
+    end
+
+    return current
+end
+
+local function SST_GetCanvasSize()
+    local width = 0
+    local height = 0
+
+    if UIParent and UIParent.GetWidth and UIParent.GetHeight then
+        width = SST_MaxDimension(width, UIParent:GetWidth())
+        height = SST_MaxDimension(height, UIParent:GetHeight())
+    end
+
+    local parentScale = SST_GetParentScale()
+    if not parentScale or parentScale <= 0 then
+        parentScale = 1
+    end
+
+    if GetScreenWidth and GetScreenHeight then
+        local screenWidth = tonumber(GetScreenWidth())
+        local screenHeight = tonumber(GetScreenHeight())
+
+        if screenWidth and screenWidth > 0 then
+            width = SST_MaxDimension(width, screenWidth)
+            width = SST_MaxDimension(width, screenWidth / parentScale)
+        end
+
+        if screenHeight and screenHeight > 0 then
+            height = SST_MaxDimension(height, screenHeight)
+            height = SST_MaxDimension(height, screenHeight / parentScale)
+        end
+    end
+
+    if GetCVar then
+        local resolution = GetCVar("gxResolution")
+        if resolution then
+            local _, _, resolutionWidth, resolutionHeight = string.find(resolution, "(%d+)x(%d+)")
+            resolutionWidth = tonumber(resolutionWidth)
+            resolutionHeight = tonumber(resolutionHeight)
+
+            if resolutionWidth and resolutionWidth > 0 then
+                width = SST_MaxDimension(width, resolutionWidth)
+                width = SST_MaxDimension(width, resolutionWidth / parentScale)
+            end
+
+            if resolutionHeight and resolutionHeight > 0 then
+                height = SST_MaxDimension(height, resolutionHeight)
+                height = SST_MaxDimension(height, resolutionHeight / parentScale)
+            end
+        end
+    end
+
+    if width <= 0 then
+        width = 1024
+    end
+
+    if height <= 0 then
+        height = 768
+    end
+
+    return width, height
+end
+
+local function SST_GetSafePosition(x, y, strict)
     local safeX = tonumber(x)
     local safeY = tonumber(y)
 
@@ -130,14 +202,9 @@ local function SST_GetSafePosition(x, y)
         return SST_DEFAULT_X, SST_DEFAULT_Y, true
     end
 
-    if not UIParent or not UIParent.GetWidth or not UIParent.GetHeight then
-        return safeX, safeY, false
-    end
+    local canvasWidth, canvasHeight = SST_GetCanvasSize()
 
-    local parentWidth = UIParent:GetWidth()
-    local parentHeight = UIParent:GetHeight()
-
-    if not parentWidth or not parentHeight or parentWidth <= 0 or parentHeight <= 0 then
+    if not canvasWidth or not canvasHeight or canvasWidth <= 0 or canvasHeight <= 0 then
         return safeX, safeY, false
     end
 
@@ -145,19 +212,46 @@ local function SST_GetSafePosition(x, y)
     local visualWidth = SST_FRAME_WIDTH * scale
     local visualHeight = SST_FRAME_HEIGHT * scale
 
-    local maxX = (parentWidth / 2) - (visualWidth / 2) - SST_SCREEN_PADDING
-    local maxY = (parentHeight / 2) - (visualHeight / 2) - SST_SCREEN_PADDING
+    local minX
+    local maxX
+    local minY
+    local maxY
 
-    if maxX < 0 then
-        maxX = 0
+    if strict then
+        minX = -(canvasWidth / 2) + (visualWidth / 2) + SST_SCREEN_PADDING
+        maxX = (canvasWidth / 2) - (visualWidth / 2) - SST_SCREEN_PADDING
+        minY = -(canvasHeight / 2) + (visualHeight / 2) + SST_SCREEN_PADDING
+        maxY = (canvasHeight / 2) - (visualHeight / 2) - SST_SCREEN_PADDING
+    else
+        local visibleWidth = SST_MIN_VISIBLE_WIDTH
+        local visibleHeight = SST_MIN_VISIBLE_HEIGHT
+
+        if visibleWidth > visualWidth then
+            visibleWidth = visualWidth
+        end
+
+        if visibleHeight > visualHeight then
+            visibleHeight = visualHeight
+        end
+
+        minX = -(canvasWidth / 2) - (visualWidth / 2) + visibleWidth
+        maxX = (canvasWidth / 2) + (visualWidth / 2) - visibleWidth
+        minY = -(canvasHeight / 2) - (visualHeight / 2) + visibleHeight
+        maxY = (canvasHeight / 2) + (visualHeight / 2) - visibleHeight
     end
 
-    if maxY < 0 then
-        maxY = 0
+    if minX > maxX then
+        minX = -canvasWidth / 2
+        maxX = canvasWidth / 2
     end
 
-    local clampedX = SST_Clamp(safeX, -maxX, maxX)
-    local clampedY = SST_Clamp(safeY, -maxY, maxY)
+    if minY > maxY then
+        minY = -canvasHeight / 2
+        maxY = canvasHeight / 2
+    end
+
+    local clampedX = SST_Clamp(safeX, minX, maxX)
+    local clampedY = SST_Clamp(safeY, minY, maxY)
 
     return clampedX, clampedY, clampedX ~= safeX or clampedY ~= safeY
 end
@@ -878,7 +972,7 @@ local function SST_NormalizeSlashCommand(message)
 end
 
 local function SST_PrintHelp()
-    SST_Print("commands: /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst reset, /sst scale <value>, /sst test [name] [seconds]")
+    SST_Print("commands: /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst reset, /sst scale <value>, /sst pos, /sst test [name] [seconds]")
 end
 
 local function SST_SlashHandler(message)
@@ -937,6 +1031,28 @@ local function SST_SlashHandler(message)
     if msg == "reset" or msg == "center" then
         SST_ResetFrame()
         SST_Print("frame reset to the screen center.")
+        return
+    end
+
+    if msg == "pos" or msg == "debugpos" then
+        local canvasWidth, canvasHeight = SST_GetCanvasSize()
+        local parentWidth = 0
+        local parentHeight = 0
+        local screenWidth = 0
+        local screenHeight = 0
+
+        if UIParent and UIParent.GetWidth and UIParent.GetHeight then
+            parentWidth = UIParent:GetWidth() or 0
+            parentHeight = UIParent:GetHeight() or 0
+        end
+
+        if GetScreenWidth and GetScreenHeight then
+            screenWidth = GetScreenWidth() or 0
+            screenHeight = GetScreenHeight() or 0
+        end
+
+        SST_Print("pos x=" .. (SoulstoneTrackerDB.x or "nil") .. ", y=" .. (SoulstoneTrackerDB.y or "nil") .. ", scale=" .. (SoulstoneTrackerDB.scale or "nil") .. ".")
+        SST_Print("ui parent=" .. parentWidth .. "x" .. parentHeight .. ", screen=" .. screenWidth .. "x" .. screenHeight .. ", canvas=" .. canvasWidth .. "x" .. canvasHeight .. ", parentScale=" .. SST_GetParentScale() .. ".")
         return
     end
 
