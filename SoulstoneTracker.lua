@@ -1,5 +1,5 @@
 local SST_ADDON_NAME = "SoulstoneTracker"
-local SST_VERSION = "0.1.1"
+local SST_VERSION = "0.1.2"
 local SST_DURATION_SECONDS = 1800
 local SST_WARN_FIVE_SECONDS = 300
 local SST_WARN_ONE_SECONDS = 60
@@ -16,6 +16,7 @@ local SST_UpdateText = nil
 local SST_Pending = nil
 local SST_LastUpdate = 0
 local SST_OriginalSpellTargetUnit = nil
+local SST_Drag = nil
 
 local SST_SOULSTONE_SPELL_IDS = {
     [20707] = true, -- Minor Soulstone effect
@@ -95,6 +96,32 @@ local function SST_GetSafeScale(value)
     return scale
 end
 
+local function SST_GetParentScale()
+    if UIParent and UIParent.GetEffectiveScale then
+        local scale = UIParent:GetEffectiveScale()
+        if scale and scale > 0 then
+            return scale
+        end
+    end
+
+    if UIParent and UIParent.GetScale then
+        local scale = UIParent:GetScale()
+        if scale and scale > 0 then
+            return scale
+        end
+    end
+
+    return 1
+end
+
+local function SST_GetFrameScale()
+    if SoulstoneTrackerDB then
+        return SST_GetSafeScale(SoulstoneTrackerDB.scale)
+    end
+
+    return 1
+end
+
 local function SST_GetSafePosition(x, y)
     local safeX = tonumber(x)
     local safeY = tonumber(y)
@@ -114,13 +141,12 @@ local function SST_GetSafePosition(x, y)
         return safeX, safeY, false
     end
 
-    local scale = 1
-    if SoulstoneTrackerDB then
-        scale = SST_GetSafeScale(SoulstoneTrackerDB.scale)
-    end
+    local scale = SST_GetFrameScale()
+    local visualWidth = SST_FRAME_WIDTH * scale
+    local visualHeight = SST_FRAME_HEIGHT * scale
 
-    local maxX = (parentWidth / 2) - ((SST_FRAME_WIDTH * scale) / 2) - SST_SCREEN_PADDING
-    local maxY = (parentHeight / 2) - ((SST_FRAME_HEIGHT * scale) / 2) - SST_SCREEN_PADDING
+    local maxX = (parentWidth / 2) - (visualWidth / 2) - SST_SCREEN_PADDING
+    local maxY = (parentHeight / 2) - (visualHeight / 2) - SST_SCREEN_PADDING
 
     if maxX < 0 then
         maxX = 0
@@ -134,6 +160,49 @@ local function SST_GetSafePosition(x, y)
     local clampedY = SST_Clamp(safeY, -maxY, maxY)
 
     return clampedX, clampedY, clampedX ~= safeX or clampedY ~= safeY
+end
+
+local function SST_GetCursorPositionInParent()
+    if not GetCursorPosition then
+        return nil, nil
+    end
+
+    local cursorX, cursorY = GetCursorPosition()
+    local parentScale = SST_GetParentScale()
+
+    if not cursorX or not cursorY or parentScale <= 0 then
+        return nil, nil
+    end
+
+    return cursorX / parentScale, cursorY / parentScale
+end
+
+local function SST_GetCurrentFramePosition()
+    if not SST_Frame or not SST_Frame.GetCenter or not UIParent or not UIParent.GetCenter then
+        return nil, nil
+    end
+
+    local frameX, frameY = SST_Frame:GetCenter()
+    local parentX, parentY = UIParent:GetCenter()
+
+    if not frameX or not frameY or not parentX or not parentY then
+        return nil, nil
+    end
+
+    local frameEffectiveScale = 1
+    if SST_Frame.GetEffectiveScale then
+        frameEffectiveScale = SST_Frame:GetEffectiveScale() or 1
+    end
+
+    local parentScale = SST_GetParentScale()
+    if parentScale <= 0 then
+        parentScale = 1
+    end
+
+    frameX = frameX * frameEffectiveScale / parentScale
+    frameY = frameY * frameEffectiveScale / parentScale
+
+    return frameX - parentX, frameY - parentY
 end
 
 local function SST_TableHasSoulstoneSpellID(value)
@@ -184,11 +253,10 @@ local function SST_SavePosition()
         return
     end
 
-    local x, y = SST_Frame:GetCenter()
-    local ux, uy = UIParent:GetCenter()
+    local x, y = SST_GetCurrentFramePosition()
 
-    if x and y and ux and uy then
-        local safeX, safeY = SST_GetSafePosition(x - ux, y - uy)
+    if x and y then
+        local safeX, safeY = SST_GetSafePosition(x, y)
         SoulstoneTrackerDB.x = safeX
         SoulstoneTrackerDB.y = safeY
         return
@@ -218,9 +286,14 @@ local function SST_ApplyFrameState()
     SST_Frame:SetScale(SoulstoneTrackerDB.scale)
     SST_Frame:EnableMouse(not SoulstoneTrackerDB.locked)
 
+    if SoulstoneTrackerDB.locked and SST_Drag then
+        SST_Drag = nil
+    end
+
     if SoulstoneTrackerDB.visible then
         SST_Frame:Show()
     else
+        SST_Drag = nil
         SST_Frame:Hide()
     end
 end
@@ -648,7 +721,71 @@ local function SST_OnEvent()
     end
 end
 
+local function SST_StartDrag()
+    if not SoulstoneTrackerDB or SoulstoneTrackerDB.locked then
+        return
+    end
+
+    local cursorX, cursorY = SST_GetCursorPositionInParent()
+    if not cursorX or not cursorY then
+        return
+    end
+
+    local startX = SoulstoneTrackerDB.x
+    local startY = SoulstoneTrackerDB.y
+
+    if not startX or not startY then
+        startX, startY = SST_GetCurrentFramePosition()
+    end
+
+    if not startX or not startY then
+        startX = SST_DEFAULT_X
+        startY = SST_DEFAULT_Y
+    end
+
+    startX, startY = SST_GetSafePosition(startX, startY)
+
+    SST_Drag = {
+        cursorX = cursorX,
+        cursorY = cursorY,
+        startX = startX,
+        startY = startY
+    }
+end
+
+local function SST_StopDrag()
+    if not SST_Drag then
+        return
+    end
+
+    SST_Drag = nil
+
+    if SoulstoneTrackerDB then
+        SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
+        SST_ApplyPosition()
+    end
+end
+
+local function SST_UpdateDrag()
+    if not SST_Drag or not SoulstoneTrackerDB then
+        return
+    end
+
+    local cursorX, cursorY = SST_GetCursorPositionInParent()
+    if not cursorX or not cursorY then
+        return
+    end
+
+    local newX = SST_Drag.startX + (cursorX - SST_Drag.cursorX)
+    local newY = SST_Drag.startY + (cursorY - SST_Drag.cursorY)
+
+    SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(newX, newY)
+    SST_ApplyPosition()
+end
+
 local function SST_OnUpdate()
+    SST_UpdateDrag()
+
     SST_LastUpdate = SST_LastUpdate + arg1
     if SST_LastUpdate < 1 then
         return
@@ -663,10 +800,7 @@ end
 local function SST_CreateFrame()
     SST_Frame:SetWidth(SST_FRAME_WIDTH)
     SST_Frame:SetHeight(SST_FRAME_HEIGHT)
-    SST_Frame:SetMovable(true)
-    if SST_Frame.SetClampedToScreen then
-        SST_Frame:SetClampedToScreen(true)
-    end
+    SST_Frame:SetMovable(false)
     SST_Frame:SetFrameStrata("HIGH")
     if SST_Frame.SetFrameLevel then
         SST_Frame:SetFrameLevel(100)
@@ -674,7 +808,6 @@ local function SST_CreateFrame()
     if SST_Frame.SetToplevel then
         SST_Frame:SetToplevel(true)
     end
-    SST_Frame:RegisterForDrag("LeftButton")
     SST_Frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -689,17 +822,20 @@ local function SST_CreateFrame()
     SST_Text:SetPoint("CENTER", SST_Frame, "CENTER", 0, 0)
     SST_Text:SetText("Soulstone: none")
 
-    SST_Frame:SetScript("OnDragStart", function()
-        if SoulstoneTrackerDB and not SoulstoneTrackerDB.locked then
-            this:StartMoving()
+    SST_Frame:SetScript("OnMouseDown", function()
+        if arg1 == "LeftButton" then
+            SST_StartDrag()
         end
     end)
 
-    SST_Frame:SetScript("OnDragStop", function()
-        this:StopMovingOrSizing()
-        SST_SavePosition()
-        SST_ApplyPosition()
-        SST_ApplyFrameState()
+    SST_Frame:SetScript("OnMouseUp", function()
+        if arg1 == "LeftButton" then
+            SST_StopDrag()
+        end
+    end)
+
+    SST_Frame:SetScript("OnHide", function()
+        SST_StopDrag()
     end)
 
     SST_Frame:SetScript("OnEvent", SST_OnEvent)
@@ -809,8 +945,8 @@ local function SST_SlashHandler(message)
         local scale = tonumber(scaleValue)
         if scale and scale >= 0.5 and scale <= 2 then
             SoulstoneTrackerDB.scale = scale
-            SST_ApplyPosition()
             SST_ApplyFrameState()
+            SST_ApplyPosition()
             SST_Print("scale set to " .. scale .. ".")
         else
             SST_Print("scale must be between 0.5 and 2.")
