@@ -1,10 +1,14 @@
 local SST_ADDON_NAME = "SoulstoneTracker"
-local SST_VERSION = "0.1.3"
+local SST_VERSION = "0.2.0"
 local SST_DURATION_SECONDS = 1800
 local SST_WARN_FIVE_SECONDS = 300
 local SST_WARN_ONE_SECONDS = 60
 local SST_FRAME_WIDTH = 220
 local SST_FRAME_HEIGHT = 28
+local SST_BUTTON_SIZE = 32
+local SST_SETTINGS_WIDTH = 440
+local SST_SETTINGS_HEIGHT = 360
+local SST_SOULSTONE_TEXTURE = "Interface\\Icons\\Spell_Shadow_SoulGem"
 local SST_DEFAULT_X = 0
 local SST_DEFAULT_Y = 120
 local SST_SCREEN_PADDING = 12
@@ -12,6 +16,7 @@ local SST_MIN_VISIBLE_WIDTH = 36
 local SST_MIN_VISIBLE_HEIGHT = 14
 
 local SST = {}
+local SST_CoreFrame = CreateFrame("Frame", "SoulstoneTrackerCoreFrame", UIParent)
 local SST_Frame = CreateFrame("Frame", "SoulstoneTrackerFrame", UIParent)
 local SST_Text = nil
 local SST_UpdateText = nil
@@ -19,6 +24,20 @@ local SST_Pending = nil
 local SST_LastUpdate = 0
 local SST_OriginalSpellTargetUnit = nil
 local SST_Drag = nil
+local SST_ButtonDrag = nil
+local SST_SettingsFrame = nil
+local SST_SettingsTitle = nil
+local SST_SettingsTabs = {}
+local SST_SettingsPages = {}
+local SST_SettingsControls = {}
+local SST_MinimapButton = nil
+local SST_MinimapButtonIcon = nil
+local SST_RefreshSettingsUI = nil
+local SST_ToggleSettingsFrame = nil
+local SST_ApplyButtonState = nil
+local SST_SetSettingsTab = nil
+local SST_LastAnnouncementAt = 0
+local SST_LastAnnouncementTarget = nil
 
 local SST_SOULSTONE_SPELL_IDS = {
     [20707] = true, -- Minor Soulstone effect
@@ -35,6 +54,18 @@ local SST_SOULSTONE_ITEM_IDS = {
     [16895] = true, -- Greater Soulstone
     [16896] = true  -- Major Soulstone
 }
+
+local SST_ANNOUNCE_CHANNELS = {
+    { key = "SMART", label = "Smart: Raid > Party > Say" },
+    { key = "SAY", label = "Say" },
+    { key = "PARTY", label = "Party" },
+    { key = "RAID", label = "Raid" },
+    { key = "GUILD", label = "Guild" },
+    { key = "YELL", label = "Yell" },
+    { key = "EMOTE", label = "Emote" }
+}
+
+local SST_DEFAULT_ANNOUNCE_MESSAGE = "Soulstone applied to {target}. It will expire in {duration}."
 
 local function SST_Now()
     if time then
@@ -194,7 +225,42 @@ local function SST_GetCanvasSize()
     return width, height
 end
 
-local function SST_GetSafePosition(x, y, strict)
+local function SST_GetUIParentSize()
+    local width = 1024
+    local height = 768
+
+    if UIParent and UIParent.GetWidth and UIParent.GetHeight then
+        local parentWidth = tonumber(UIParent:GetWidth())
+        local parentHeight = tonumber(UIParent:GetHeight())
+
+        if parentWidth and parentWidth > 0 then
+            width = parentWidth
+        end
+
+        if parentHeight and parentHeight > 0 then
+            height = parentHeight
+        end
+    end
+
+    return width, height
+end
+
+local function SST_GetRelativeCenterToUIParent(frame)
+    if not frame or not frame.GetCenter or not UIParent or not UIParent.GetCenter then
+        return nil, nil
+    end
+
+    local frameX, frameY = frame:GetCenter()
+    local parentX, parentY = UIParent:GetCenter()
+
+    if not frameX or not frameY or not parentX or not parentY then
+        return nil, nil
+    end
+
+    return frameX - parentX, frameY - parentY
+end
+
+local function SST_GetSafePositionForSize(x, y, width, height, scale, minVisibleWidth, minVisibleHeight, strict)
     local safeX = tonumber(x)
     local safeY = tonumber(y)
 
@@ -208,9 +274,13 @@ local function SST_GetSafePosition(x, y, strict)
         return safeX, safeY, false
     end
 
-    local scale = SST_GetFrameScale()
-    local visualWidth = SST_FRAME_WIDTH * scale
-    local visualHeight = SST_FRAME_HEIGHT * scale
+    local actualScale = tonumber(scale) or 1
+    if actualScale <= 0 then
+        actualScale = 1
+    end
+
+    local visualWidth = (tonumber(width) or SST_FRAME_WIDTH) * actualScale
+    local visualHeight = (tonumber(height) or SST_FRAME_HEIGHT) * actualScale
 
     local minX
     local maxX
@@ -223,8 +293,8 @@ local function SST_GetSafePosition(x, y, strict)
         minY = -(canvasHeight / 2) + (visualHeight / 2) + SST_SCREEN_PADDING
         maxY = (canvasHeight / 2) - (visualHeight / 2) - SST_SCREEN_PADDING
     else
-        local visibleWidth = SST_MIN_VISIBLE_WIDTH
-        local visibleHeight = SST_MIN_VISIBLE_HEIGHT
+        local visibleWidth = minVisibleWidth or SST_MIN_VISIBLE_WIDTH
+        local visibleHeight = minVisibleHeight or SST_MIN_VISIBLE_HEIGHT
 
         if visibleWidth > visualWidth then
             visibleWidth = visualWidth
@@ -254,6 +324,31 @@ local function SST_GetSafePosition(x, y, strict)
     local clampedY = SST_Clamp(safeY, minY, maxY)
 
     return clampedX, clampedY, clampedX ~= safeX or clampedY ~= safeY
+end
+
+local function SST_GetSafePosition(x, y, strict)
+    return SST_GetSafePositionForSize(x, y, SST_FRAME_WIDTH, SST_FRAME_HEIGHT, SST_GetFrameScale(), SST_MIN_VISIBLE_WIDTH, SST_MIN_VISIBLE_HEIGHT, strict)
+end
+
+local function SST_GetDefaultButtonPosition()
+    local minimapX, minimapY = SST_GetRelativeCenterToUIParent(Minimap)
+    if minimapX and minimapY then
+        return minimapX - 54, minimapY - 54
+    end
+
+    local parentWidth, parentHeight = SST_GetUIParentSize()
+    return (parentWidth / 2) - 78, (parentHeight / 2) - 96
+end
+
+local function SST_GetSafeButtonPosition(x, y)
+    local safeX = tonumber(x)
+    local safeY = tonumber(y)
+
+    if not safeX or not safeY then
+        return SST_GetDefaultButtonPosition()
+    end
+
+    return SST_GetSafePositionForSize(safeX, safeY, SST_BUTTON_SIZE, SST_BUTTON_SIZE, 1, 8, 8, false)
 end
 
 local function SST_GetCursorPositionInParent()
@@ -321,6 +416,9 @@ local function SST_InitDB()
         SoulstoneTrackerDB = {}
     end
 
+    local previousAddonVersion = SoulstoneTrackerDB.addonVersion
+    local shouldResetButtonPosition = previousAddonVersion ~= SST_VERSION and not SoulstoneTrackerDB.buttonPositionUserMoved
+
     if SoulstoneTrackerDB.visible == nil then
         SoulstoneTrackerDB.visible = true
     end
@@ -339,7 +437,33 @@ local function SST_InitDB()
         SoulstoneTrackerDB.warnOne = true
     end
 
+    if SoulstoneTrackerDB.announceEnabled == nil then
+        SoulstoneTrackerDB.announceEnabled = false
+    end
+
+    if not SoulstoneTrackerDB.announceChannel then
+        SoulstoneTrackerDB.announceChannel = "SMART"
+    end
+
+    if not SoulstoneTrackerDB.announceMessage or SoulstoneTrackerDB.announceMessage == "" then
+        SoulstoneTrackerDB.announceMessage = SST_DEFAULT_ANNOUNCE_MESSAGE
+    end
+
+    if SoulstoneTrackerDB.buttonVisible == nil then
+        SoulstoneTrackerDB.buttonVisible = true
+    end
+
+    if not SoulstoneTrackerDB.settingsTab then
+        SoulstoneTrackerDB.settingsTab = "general"
+    end
+
+    if shouldResetButtonPosition or not SoulstoneTrackerDB.buttonX or not SoulstoneTrackerDB.buttonY then
+        SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetDefaultButtonPosition()
+    end
+
+    SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
     SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
+    SoulstoneTrackerDB.addonVersion = SST_VERSION
 end
 
 local function SST_SavePosition()
@@ -389,6 +513,10 @@ local function SST_ApplyFrameState()
     else
         SST_Drag = nil
         SST_Frame:Hide()
+    end
+
+    if SST_RefreshSettingsUI then
+        SST_RefreshSettingsUI()
     end
 end
 
@@ -585,6 +713,164 @@ local function SST_ClearRecord(reason)
     end
 end
 
+local function SST_GetAnnounceChannelIndex(channel)
+    local i
+    for i = 1, table.getn(SST_ANNOUNCE_CHANNELS) do
+        if SST_ANNOUNCE_CHANNELS[i].key == channel then
+            return i
+        end
+    end
+
+    return 1
+end
+
+local function SST_GetAnnounceChannelLabel(channel)
+    return SST_ANNOUNCE_CHANNELS[SST_GetAnnounceChannelIndex(channel)].label
+end
+
+local function SST_SetAnnounceChannelByDelta(delta)
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    local index = SST_GetAnnounceChannelIndex(SoulstoneTrackerDB.announceChannel) + delta
+    local count = table.getn(SST_ANNOUNCE_CHANNELS)
+
+    if index < 1 then
+        index = count
+    end
+
+    if index > count then
+        index = 1
+    end
+
+    SoulstoneTrackerDB.announceChannel = SST_ANNOUNCE_CHANNELS[index].key
+
+    if SST_RefreshSettingsUI then
+        SST_RefreshSettingsUI()
+    end
+end
+
+local function SST_SetAnnounceChannel(channel)
+    if not SoulstoneTrackerDB or not channel then
+        return false
+    end
+
+    local normalized = string.upper(channel)
+    local i
+    for i = 1, table.getn(SST_ANNOUNCE_CHANNELS) do
+        if SST_ANNOUNCE_CHANNELS[i].key == normalized then
+            SoulstoneTrackerDB.announceChannel = normalized
+            if SST_RefreshSettingsUI then
+                SST_RefreshSettingsUI()
+            end
+            return true
+        end
+    end
+
+    return false
+end
+
+local function SST_GetSmartAnnounceChannel()
+    if GetNumRaidMembers and GetNumRaidMembers() > 0 then
+        return "RAID"
+    end
+
+    if GetNumPartyMembers and GetNumPartyMembers() > 0 then
+        return "PARTY"
+    end
+
+    return "SAY"
+end
+
+local function SST_ResolveAnnounceChannel(channel)
+    if channel == "SMART" then
+        return SST_GetSmartAnnounceChannel()
+    end
+
+    return channel or "SAY"
+end
+
+local function SST_CanSendToAnnounceChannel(channel)
+    if channel == "PARTY" then
+        if GetNumPartyMembers and GetNumPartyMembers() > 0 then
+            return true
+        end
+
+        return false, "party"
+    end
+
+    if channel == "RAID" then
+        if GetNumRaidMembers and GetNumRaidMembers() > 0 then
+            return true
+        end
+
+        return false, "raid"
+    end
+
+    if channel == "GUILD" then
+        if IsInGuild and IsInGuild() then
+            return true
+        end
+
+        return false, "guild"
+    end
+
+    return true
+end
+
+local function SST_FormatAnnouncementText(targetName)
+    local text = SST_DEFAULT_ANNOUNCE_MESSAGE
+
+    if SoulstoneTrackerDB and SoulstoneTrackerDB.announceMessage and SoulstoneTrackerDB.announceMessage ~= "" then
+        text = SoulstoneTrackerDB.announceMessage
+    end
+
+    local target = targetName or "unknown target"
+    local playerName = UnitName("player") or "warlock"
+
+    text = string.gsub(text, "{target}", target)
+    text = string.gsub(text, "{name}", target)
+    text = string.gsub(text, "{player}", playerName)
+    text = string.gsub(text, "{duration}", "30 minutes")
+
+    return text
+end
+
+local function SST_SendAnnouncement(targetName, source)
+    if not SoulstoneTrackerDB or not SoulstoneTrackerDB.announceEnabled then
+        return
+    end
+
+    if source == "test" then
+        return
+    end
+
+    local now = SST_MonoNow()
+    local normalizedTarget = targetName or "unknown target"
+
+    if SST_LastAnnouncementTarget == normalizedTarget and (now - SST_LastAnnouncementAt) < 4 then
+        return
+    end
+
+    local channel = SST_ResolveAnnounceChannel(SoulstoneTrackerDB.announceChannel)
+    local canSend, required = SST_CanSendToAnnounceChannel(channel)
+    if not canSend then
+        SST_Print("announcement not sent: selected channel requires " .. required .. ".")
+        return
+    end
+
+    local text = SST_FormatAnnouncementText(normalizedTarget)
+
+    if SendChatMessage then
+        SendChatMessage(text, channel)
+        SST_LastAnnouncementAt = now
+        SST_LastAnnouncementTarget = normalizedTarget
+    else
+        SST_Print("announcement not sent: SendChatMessage is unavailable.")
+    end
+end
+
 local function SST_TrackSoulstone(targetGuid, targetName, spellID, source)
     if not SoulstoneTrackerDB then
         return
@@ -615,6 +901,7 @@ local function SST_TrackSoulstone(targetGuid, targetName, spellID, source)
     }
 
     SST_Print("Soulstone tracked on " .. targetName .. " for 30:00.")
+    SST_SendAnnouncement(targetName, source)
 end
 
 local function SST_StartPendingCast()
@@ -776,7 +1063,10 @@ local function SST_OnEvent()
         SST_InitDB()
         SST_ApplyPosition()
         SST_ApplyFrameState()
+        SST_ApplyButtonState()
+        SST_SetSettingsTab(SoulstoneTrackerDB.settingsTab or "general")
         SST_UpdateText()
+        SST_RefreshSettingsUI()
 
         if SST_IsSuperWoWAvailable() then
             SST_Print("loaded " .. SST_VERSION .. " with SuperWoW support.")
@@ -877,8 +1167,616 @@ local function SST_UpdateDrag()
     SST_ApplyPosition()
 end
 
+local function SST_ApplyButtonPosition()
+    if not SST_MinimapButton or not SoulstoneTrackerDB then
+        return
+    end
+
+    if not SoulstoneTrackerDB.buttonX or not SoulstoneTrackerDB.buttonY then
+        SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetDefaultButtonPosition()
+    end
+
+    SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
+    SST_MinimapButton:ClearAllPoints()
+    SST_MinimapButton:SetPoint("CENTER", UIParent, "CENTER", SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
+end
+
+function SST_ApplyButtonState()
+    if not SST_MinimapButton or not SoulstoneTrackerDB then
+        return
+    end
+
+    SST_ApplyButtonPosition()
+
+    if SoulstoneTrackerDB.buttonVisible then
+        SST_MinimapButton:Show()
+        if SST_MinimapButton.Raise then
+            SST_MinimapButton:Raise()
+        end
+    else
+        SST_ButtonDrag = nil
+        SST_MinimapButton:Hide()
+    end
+
+    if SST_RefreshSettingsUI then
+        SST_RefreshSettingsUI()
+    end
+end
+
+local function SST_ResetButtonPosition()
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    SoulstoneTrackerDB.buttonVisible = true
+    SoulstoneTrackerDB.buttonPositionUserMoved = nil
+    SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetDefaultButtonPosition()
+    SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
+    SST_ApplyButtonState()
+end
+
+local function SST_StartButtonDrag()
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    local cursorX, cursorY = SST_GetCursorPositionInParent()
+    if not cursorX or not cursorY then
+        return
+    end
+
+    if not SoulstoneTrackerDB.buttonX or not SoulstoneTrackerDB.buttonY then
+        SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetDefaultButtonPosition()
+    end
+
+    SST_ButtonDrag = {
+        cursorX = cursorX,
+        cursorY = cursorY,
+        startX = SoulstoneTrackerDB.buttonX,
+        startY = SoulstoneTrackerDB.buttonY,
+        moved = false
+    }
+end
+
+local function SST_UpdateButtonDrag()
+    if not SST_ButtonDrag or not SoulstoneTrackerDB then
+        return
+    end
+
+    local cursorX, cursorY = SST_GetCursorPositionInParent()
+    if not cursorX or not cursorY then
+        return
+    end
+
+    local dx = cursorX - SST_ButtonDrag.cursorX
+    local dy = cursorY - SST_ButtonDrag.cursorY
+
+    if dx > 3 or dx < -3 or dy > 3 or dy < -3 then
+        SST_ButtonDrag.moved = true
+    end
+
+    SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SST_ButtonDrag.startX + dx, SST_ButtonDrag.startY + dy)
+    SST_ApplyButtonPosition()
+end
+
+local function SST_StopButtonDrag()
+    if not SST_ButtonDrag then
+        return false
+    end
+
+    local moved = SST_ButtonDrag.moved
+    SST_ButtonDrag = nil
+
+    if SoulstoneTrackerDB then
+        SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
+        if moved then
+            SoulstoneTrackerDB.buttonPositionUserMoved = true
+        end
+        SST_ApplyButtonPosition()
+    end
+
+    return moved
+end
+
+local function SST_CreateLabel(parent, text, x, y, template)
+    local label = parent:CreateFontString(nil, "OVERLAY", template or "GameFontNormalSmall")
+    label:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    label:SetText(text or "")
+    return label
+end
+
+local function SST_CreatePanelButton(parent, text, width, height, x, y, onClick)
+    local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    button:SetWidth(width or 90)
+    button:SetHeight(height or 22)
+    button:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    button:SetText(text or "")
+    button:SetScript("OnClick", function()
+        if onClick then
+            onClick()
+        end
+    end)
+    return button
+end
+
+local function SST_CreateCheckButton(parent, name, label, x, y, onClick)
+    local button = CreateFrame("CheckButton", name, parent, "OptionsCheckButtonTemplate")
+    button:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+
+    local text = getglobal(name .. "Text")
+    if text then
+        text:SetText(label or "")
+    end
+
+    button:SetScript("OnClick", function()
+        if onClick then
+            onClick(this:GetChecked())
+        end
+    end)
+
+    return button
+end
+
+function SST_SetSettingsTab(tab)
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    if not SST_SettingsPages[tab] then
+        tab = "general"
+    end
+
+    SoulstoneTrackerDB.settingsTab = tab
+
+    local key
+    for key in pairs(SST_SettingsPages) do
+        if key == tab then
+            SST_SettingsPages[key]:Show()
+        else
+            SST_SettingsPages[key]:Hide()
+        end
+    end
+
+    for key in pairs(SST_SettingsTabs) do
+        if key == tab then
+            SST_SettingsTabs[key]:LockHighlight()
+        else
+            SST_SettingsTabs[key]:UnlockHighlight()
+        end
+    end
+
+    if SST_RefreshSettingsUI then
+        SST_RefreshSettingsUI()
+    end
+end
+
+local function SST_ToggleTrackerVisibility()
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    SoulstoneTrackerDB.visible = not SoulstoneTrackerDB.visible
+    SST_ApplyPosition()
+    SST_ApplyFrameState()
+
+    if SoulstoneTrackerDB.visible then
+        SST_Print("frame shown.")
+    else
+        SST_Print("frame hidden.")
+    end
+end
+
+local function SST_SendTestAnnouncement()
+    if not SoulstoneTrackerDB then
+        return
+    end
+
+    local targetName = SST_ResolveUnitName("target") or SST_ResolveUnitName("mouseover") or SST_ResolveUnitName("player") or "Target"
+    local channel = SST_ResolveAnnounceChannel(SoulstoneTrackerDB.announceChannel)
+    local canSend, required = SST_CanSendToAnnounceChannel(channel)
+
+    if not canSend then
+        SST_Print("test announcement not sent: selected channel requires " .. required .. ".")
+        return
+    end
+
+    local text = SST_FormatAnnouncementText(targetName)
+
+    if SendChatMessage then
+        SendChatMessage(text, channel)
+    else
+        SST_Print("test announcement: " .. text)
+    end
+end
+
+local function SST_CreateGeneralSettingsPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints(parent)
+
+    SST_CreateLabel(page, "Tracker window", 16, -12, "GameFontNormal")
+
+    SST_SettingsControls.visibleCheck = SST_CreateCheckButton(page, "SoulstoneTrackerVisibleCheck", "Show tracker window", 16, -38, function(checked)
+        SoulstoneTrackerDB.visible = checked
+        SST_ApplyPosition()
+        SST_ApplyFrameState()
+    end)
+
+    SST_SettingsControls.lockedCheck = SST_CreateCheckButton(page, "SoulstoneTrackerLockedCheck", "Lock tracker window", 16, -66, function(checked)
+        SoulstoneTrackerDB.locked = checked
+        SST_ApplyFrameState()
+    end)
+
+    SST_SettingsControls.buttonVisibleCheck = SST_CreateCheckButton(page, "SoulstoneTrackerButtonVisibleCheck", "Show launcher button", 16, -94, function(checked)
+        SoulstoneTrackerDB.buttonVisible = checked
+        SST_ApplyButtonState()
+    end)
+
+    SST_SettingsControls.warnFiveCheck = SST_CreateCheckButton(page, "SoulstoneTrackerWarnFiveCheck", "Warn at 5 minutes remaining", 16, -122, function(checked)
+        SoulstoneTrackerDB.warnFive = checked
+    end)
+
+    SST_SettingsControls.warnOneCheck = SST_CreateCheckButton(page, "SoulstoneTrackerWarnOneCheck", "Warn at 1 minute remaining", 16, -150, function(checked)
+        SoulstoneTrackerDB.warnOne = checked
+    end)
+
+    SST_SettingsControls.scaleLabel = SST_CreateLabel(page, "Scale: 1", 16, -190, "GameFontNormalSmall")
+
+    SST_CreatePanelButton(page, "-", 32, 22, 110, -184, function()
+        SoulstoneTrackerDB.scale = SST_GetSafeScale((SoulstoneTrackerDB.scale or 1) - 0.1)
+        SST_ApplyFrameState()
+        SST_ApplyPosition()
+    end)
+
+    SST_CreatePanelButton(page, "+", 32, 22, 148, -184, function()
+        SoulstoneTrackerDB.scale = SST_GetSafeScale((SoulstoneTrackerDB.scale or 1) + 0.1)
+        SST_ApplyFrameState()
+        SST_ApplyPosition()
+    end)
+
+    SST_CreatePanelButton(page, "Reset tracker", 120, 22, 16, -226, function()
+        SST_ResetFrame()
+        SST_Print("frame reset to the screen center.")
+    end)
+
+    SST_CreatePanelButton(page, "Reset button", 120, 22, 146, -226, function()
+        SST_ResetButtonPosition()
+        SST_Print("launcher button reset near the minimap.")
+    end)
+
+    return page
+end
+
+local function SST_CreateNotificationSettingsPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints(parent)
+
+    SST_CreateLabel(page, "Soulstone announcement", 16, -12, "GameFontNormal")
+
+    SST_SettingsControls.announceEnabledCheck = SST_CreateCheckButton(page, "SoulstoneTrackerAnnounceEnabledCheck", "Announce when you apply Soulstone", 16, -38, function(checked)
+        SoulstoneTrackerDB.announceEnabled = checked
+    end)
+
+    SST_CreateLabel(page, "Channel", 16, -82, "GameFontNormalSmall")
+    SST_SettingsControls.channelLabel = SST_CreateLabel(page, "Smart: Raid > Party > Say", 92, -82, "GameFontHighlightSmall")
+
+    SST_CreatePanelButton(page, "Previous", 80, 22, 16, -108, function()
+        SST_SetAnnounceChannelByDelta(-1)
+    end)
+
+    SST_CreatePanelButton(page, "Next", 80, 22, 104, -108, function()
+        SST_SetAnnounceChannelByDelta(1)
+    end)
+
+    SST_CreateLabel(page, "Message", 16, -154, "GameFontNormalSmall")
+
+    local edit = CreateFrame("EditBox", "SoulstoneTrackerAnnounceMessageEditBox", page, "InputBoxTemplate")
+    edit:SetWidth(380)
+    edit:SetHeight(24)
+    edit:SetPoint("TOPLEFT", page, "TOPLEFT", 16, -176)
+    edit:SetAutoFocus(false)
+    edit:SetMaxLetters(180)
+    edit:SetScript("OnEscapePressed", function()
+        this:ClearFocus()
+    end)
+    edit:SetScript("OnEnterPressed", function()
+        this:ClearFocus()
+    end)
+    edit:SetScript("OnTextChanged", function()
+        if SST_SettingsControls.refreshing then
+            return
+        end
+
+        if SoulstoneTrackerDB then
+            SoulstoneTrackerDB.announceMessage = this:GetText()
+        end
+    end)
+    SST_SettingsControls.announceMessageEdit = edit
+
+    SST_CreateLabel(page, "Placeholders: {target}, {name}, {player}, {duration}", 16, -212, "GameFontHighlightSmall")
+
+    SST_CreatePanelButton(page, "Default text", 110, 22, 16, -244, function()
+        SoulstoneTrackerDB.announceMessage = SST_DEFAULT_ANNOUNCE_MESSAGE
+        if SST_RefreshSettingsUI then
+            SST_RefreshSettingsUI()
+        end
+    end)
+
+    SST_CreatePanelButton(page, "Send test", 110, 22, 136, -244, function()
+        SST_SendTestAnnouncement()
+    end)
+
+    return page
+end
+
+local function SST_CreateDebugSettingsPage(parent)
+    local page = CreateFrame("Frame", nil, parent)
+    page:SetAllPoints(parent)
+
+    SST_CreateLabel(page, "Status and diagnostics", 16, -12, "GameFontNormal")
+    SST_SettingsControls.debugStatusLabel = SST_CreateLabel(page, "", 16, -42, "GameFontHighlightSmall")
+    SST_SettingsControls.debugPositionLabel = SST_CreateLabel(page, "", 16, -64, "GameFontHighlightSmall")
+    SST_SettingsControls.debugSuperWowLabel = SST_CreateLabel(page, "", 16, -86, "GameFontHighlightSmall")
+
+    SST_CreatePanelButton(page, "Print status", 110, 22, 16, -126, function()
+        if SoulstoneTrackerDB and SoulstoneTrackerDB.record then
+            local remaining = SoulstoneTrackerDB.record.expiresAt - SST_Now()
+            SST_Print("active: " .. (SoulstoneTrackerDB.record.name or "unknown target") .. ", remaining " .. SST_FormatTime(remaining) .. ".")
+        else
+            SST_Print("no active tracked soulstone.")
+        end
+    end)
+
+    SST_CreatePanelButton(page, "Clear tracker", 110, 22, 136, -126, function()
+        SST_ClearRecord("tracking cleared.")
+        SST_UpdateText()
+        if SST_RefreshSettingsUI then
+            SST_RefreshSettingsUI()
+        end
+    end)
+
+    SST_CreatePanelButton(page, "Print position", 110, 22, 256, -126, function()
+        local canvasWidth, canvasHeight = SST_GetCanvasSize()
+        SST_Print("tracker x=" .. (SoulstoneTrackerDB.x or "nil") .. ", y=" .. (SoulstoneTrackerDB.y or "nil") .. ", scale=" .. (SoulstoneTrackerDB.scale or "nil") .. ".")
+        SST_Print("button x=" .. (SoulstoneTrackerDB.buttonX or "nil") .. ", y=" .. (SoulstoneTrackerDB.buttonY or "nil") .. ", canvas=" .. canvasWidth .. "x" .. canvasHeight .. ".")
+    end)
+
+    SST_CreateLabel(page, "Command aliases: /sst options, /sst config, /sst button reset, /sst announce test", 16, -174, "GameFontHighlightSmall")
+
+    return page
+end
+
+function SST_RefreshSettingsUI()
+    if not SoulstoneTrackerDB or not SST_SettingsFrame then
+        return
+    end
+
+    SST_SettingsControls.refreshing = true
+
+    if SST_SettingsControls.visibleCheck then
+        SST_SettingsControls.visibleCheck:SetChecked(SoulstoneTrackerDB.visible)
+    end
+
+    if SST_SettingsControls.lockedCheck then
+        SST_SettingsControls.lockedCheck:SetChecked(SoulstoneTrackerDB.locked)
+    end
+
+    if SST_SettingsControls.buttonVisibleCheck then
+        SST_SettingsControls.buttonVisibleCheck:SetChecked(SoulstoneTrackerDB.buttonVisible)
+    end
+
+    if SST_SettingsControls.warnFiveCheck then
+        SST_SettingsControls.warnFiveCheck:SetChecked(SoulstoneTrackerDB.warnFive)
+    end
+
+    if SST_SettingsControls.warnOneCheck then
+        SST_SettingsControls.warnOneCheck:SetChecked(SoulstoneTrackerDB.warnOne)
+    end
+
+    if SST_SettingsControls.scaleLabel then
+        SST_SettingsControls.scaleLabel:SetText("Scale: " .. (SoulstoneTrackerDB.scale or 1))
+    end
+
+    if SST_SettingsControls.announceEnabledCheck then
+        SST_SettingsControls.announceEnabledCheck:SetChecked(SoulstoneTrackerDB.announceEnabled)
+    end
+
+    if SST_SettingsControls.channelLabel then
+        local resolved = SST_ResolveAnnounceChannel(SoulstoneTrackerDB.announceChannel)
+        local label = SST_GetAnnounceChannelLabel(SoulstoneTrackerDB.announceChannel)
+        if SoulstoneTrackerDB.announceChannel == "SMART" then
+            label = label .. " (current: " .. resolved .. ")"
+        end
+        SST_SettingsControls.channelLabel:SetText(label)
+    end
+
+    if SST_SettingsControls.announceMessageEdit then
+        local hasFocus = false
+        if SST_SettingsControls.announceMessageEdit.HasFocus then
+            hasFocus = SST_SettingsControls.announceMessageEdit:HasFocus()
+        end
+
+        if not hasFocus then
+            SST_SettingsControls.announceMessageEdit:SetText(SoulstoneTrackerDB.announceMessage or SST_DEFAULT_ANNOUNCE_MESSAGE)
+        end
+    end
+
+    if SST_SettingsControls.debugStatusLabel then
+        if SoulstoneTrackerDB.record then
+            local remaining = SoulstoneTrackerDB.record.expiresAt - SST_Now()
+            SST_SettingsControls.debugStatusLabel:SetText("Tracked: " .. (SoulstoneTrackerDB.record.name or "unknown target") .. ", remaining " .. SST_FormatTime(remaining))
+        else
+            SST_SettingsControls.debugStatusLabel:SetText("Tracked: none")
+        end
+    end
+
+    if SST_SettingsControls.debugPositionLabel then
+        SST_SettingsControls.debugPositionLabel:SetText("Tracker: x=" .. (SoulstoneTrackerDB.x or "nil") .. ", y=" .. (SoulstoneTrackerDB.y or "nil") .. ", scale=" .. (SoulstoneTrackerDB.scale or "nil") .. "; Button: x=" .. (SoulstoneTrackerDB.buttonX or "nil") .. ", y=" .. (SoulstoneTrackerDB.buttonY or "nil"))
+    end
+
+    if SST_SettingsControls.debugSuperWowLabel then
+        if SST_IsSuperWoWAvailable() then
+            SST_SettingsControls.debugSuperWowLabel:SetText("SuperWoW: detected")
+        else
+            SST_SettingsControls.debugSuperWowLabel:SetText("SuperWoW: not detected; target tracking is approximate")
+        end
+    end
+
+    SST_SettingsControls.refreshing = false
+end
+
+local function SST_CreateSettingsFrame()
+    if SST_SettingsFrame then
+        return
+    end
+
+    local frame = CreateFrame("Frame", "SoulstoneTrackerSettingsFrame", UIParent)
+    SST_SettingsFrame = frame
+    frame:SetWidth(SST_SETTINGS_WIDTH)
+    frame:SetHeight(SST_SETTINGS_HEIGHT)
+    frame:SetPoint("CENTER", UIParent, "CENTER", 0, 0)
+    frame:SetFrameStrata("DIALOG")
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", function()
+        this:StartMoving()
+    end)
+    frame:SetScript("OnDragStop", function()
+        this:StopMovingOrSizing()
+    end)
+    frame:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true,
+        tileSize = 32,
+        edgeSize = 32,
+        insets = { left = 11, right = 12, top = 12, bottom = 11 }
+    })
+
+    SST_SettingsTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    SST_SettingsTitle:SetPoint("TOP", frame, "TOP", 0, -16)
+    SST_SettingsTitle:SetText("SoulstoneTracker Settings")
+
+    local close = CreateFrame("Button", "SoulstoneTrackerSettingsCloseButton", frame, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -5, -5)
+
+    local tabGeneral = SST_CreatePanelButton(frame, "General", 92, 22, 18, -46, function()
+        SST_SetSettingsTab("general")
+    end)
+    local tabNotifications = SST_CreatePanelButton(frame, "Notifications", 112, 22, 114, -46, function()
+        SST_SetSettingsTab("notifications")
+    end)
+    --local tabDebug = SST_CreatePanelButton(frame, "Debug", 92, 22, 230, -46, function()
+    --    SST_SetSettingsTab("debug")
+    --end)
+
+    SST_SettingsTabs.general = tabGeneral
+    SST_SettingsTabs.notifications = tabNotifications
+    --SST_SettingsTabs.debug = tabDebug
+
+    local content = CreateFrame("Frame", nil, frame)
+    content:SetPoint("TOPLEFT", frame, "TOPLEFT", 22, -78)
+    content:SetWidth(SST_SETTINGS_WIDTH - 44)
+    content:SetHeight(SST_SETTINGS_HEIGHT - 100)
+
+    SST_SettingsPages.general = SST_CreateGeneralSettingsPage(content)
+    SST_SettingsPages.notifications = SST_CreateNotificationSettingsPage(content)
+    --SST_SettingsPages.debug = SST_CreateDebugSettingsPage(content)
+
+    frame:Hide()
+end
+
+function SST_ToggleSettingsFrame(forceShow)
+    if not SST_SettingsFrame then
+        return
+    end
+
+    if forceShow or not SST_SettingsFrame:IsVisible() then
+        SST_SettingsFrame:Show()
+        SST_SetSettingsTab(SoulstoneTrackerDB and SoulstoneTrackerDB.settingsTab or "general")
+        SST_RefreshSettingsUI()
+    else
+        SST_SettingsFrame:Hide()
+    end
+end
+
+local function SST_CreateMinimapButton()
+    if SST_MinimapButton then
+        return
+    end
+
+    local button = CreateFrame("Button", "SoulstoneTrackerLauncherButton", UIParent)
+    SST_MinimapButton = button
+    button:SetWidth(SST_BUTTON_SIZE)
+    button:SetHeight(SST_BUTTON_SIZE)
+    button:SetFrameStrata("MEDIUM")
+    if button.SetFrameLevel then
+        button:SetFrameLevel(80)
+    end
+    button:EnableMouse(true)
+
+    local icon = button:CreateTexture(nil, "BACKGROUND")
+    SST_MinimapButtonIcon = icon
+    icon:SetTexture(SST_SOULSTONE_TEXTURE)
+    icon:SetWidth(20)
+    icon:SetHeight(20)
+    icon:SetPoint("TOPLEFT", button, "TOPLEFT", 7, -5)
+    if icon.SetTexCoord then
+        icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    end
+
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    border:SetWidth(53)
+    border:SetHeight(53)
+    border:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+
+    local highlight = button:CreateTexture(nil, "HIGHLIGHT")
+    highlight:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    highlight:SetWidth(32)
+    highlight:SetHeight(32)
+    highlight:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+    highlight:SetBlendMode("ADD")
+
+    button:SetScript("OnMouseDown", function()
+        if arg1 == "LeftButton" then
+            SST_StartButtonDrag()
+        end
+    end)
+
+    button:SetScript("OnMouseUp", function()
+        if arg1 == "LeftButton" then
+            local moved = SST_StopButtonDrag()
+            if not moved then
+                SST_ToggleSettingsFrame(true)
+            end
+        elseif arg1 == "RightButton" then
+            SST_StopButtonDrag()
+            SST_ToggleTrackerVisibility()
+        end
+    end)
+
+    button:SetScript("OnEnter", function()
+        if GameTooltip then
+            GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("SoulstoneTracker")
+            GameTooltip:AddLine("Left-click: settings", 1, 1, 1)
+            GameTooltip:AddLine("Right-click: show/hide tracker", 1, 1, 1)
+            GameTooltip:AddLine("Drag: move button", 1, 1, 1)
+            GameTooltip:Show()
+        end
+    end)
+
+    button:SetScript("OnLeave", function()
+        if GameTooltip then
+            GameTooltip:Hide()
+        end
+    end)
+end
+
 local function SST_OnUpdate()
     SST_UpdateDrag()
+    SST_UpdateButtonDrag()
 
     SST_LastUpdate = SST_LastUpdate + arg1
     if SST_LastUpdate < 1 then
@@ -895,12 +1793,12 @@ local function SST_CreateFrame()
     SST_Frame:SetWidth(SST_FRAME_WIDTH)
     SST_Frame:SetHeight(SST_FRAME_HEIGHT)
     SST_Frame:SetMovable(false)
-    SST_Frame:SetFrameStrata("HIGH")
+    SST_Frame:SetFrameStrata("LOW")
     if SST_Frame.SetFrameLevel then
-        SST_Frame:SetFrameLevel(100)
+        SST_Frame:SetFrameLevel(20)
     end
     if SST_Frame.SetToplevel then
-        SST_Frame:SetToplevel(true)
+        SST_Frame:SetToplevel(false)
     end
     SST_Frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -932,21 +1830,21 @@ local function SST_CreateFrame()
         SST_StopDrag()
     end)
 
-    SST_Frame:SetScript("OnEvent", SST_OnEvent)
-    SST_Frame:SetScript("OnUpdate", SST_OnUpdate)
+    SST_CoreFrame:SetScript("OnEvent", SST_OnEvent)
+    SST_CoreFrame:SetScript("OnUpdate", SST_OnUpdate)
 
-    SST_Frame:RegisterEvent("ADDON_LOADED")
-    SST_Frame:RegisterEvent("SPELLCAST_START")
-    SST_Frame:RegisterEvent("SPELLCAST_STOP")
-    SST_Frame:RegisterEvent("SPELLCAST_FAILED")
-    SST_Frame:RegisterEvent("SPELLCAST_INTERRUPTED")
-    SST_Frame:RegisterEvent("PLAYER_TARGET_CHANGED")
-    SST_Frame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
-    SST_Frame:RegisterEvent("RAID_ROSTER_UPDATE")
-    SST_Frame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+    SST_CoreFrame:RegisterEvent("ADDON_LOADED")
+    SST_CoreFrame:RegisterEvent("SPELLCAST_START")
+    SST_CoreFrame:RegisterEvent("SPELLCAST_STOP")
+    SST_CoreFrame:RegisterEvent("SPELLCAST_FAILED")
+    SST_CoreFrame:RegisterEvent("SPELLCAST_INTERRUPTED")
+    SST_CoreFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+    SST_CoreFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+    SST_CoreFrame:RegisterEvent("RAID_ROSTER_UPDATE")
+    SST_CoreFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
 
     if SST_IsSuperWoWAvailable() then
-        SST_Frame:RegisterEvent("UNIT_CASTEVENT")
+        SST_CoreFrame:RegisterEvent("UNIT_CASTEVENT")
     end
 end
 
@@ -972,7 +1870,7 @@ local function SST_NormalizeSlashCommand(message)
 end
 
 local function SST_PrintHelp()
-    SST_Print("commands: /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst reset, /sst scale <value>, /sst pos, /sst test [name] [seconds]")
+    SST_Print("commands: /sst options, /sst status, /sst clear, /sst lock, /sst unlock, /sst show, /sst hide, /sst reset, /sst scale <value>, /sst pos, /sst button reset, /sst announce on|off|test|channel <name>|text <message>")
 end
 
 local function SST_SlashHandler(message)
@@ -980,6 +1878,74 @@ local function SST_SlashHandler(message)
 
     if msg == "" or msg == "help" then
         SST_PrintHelp()
+        return
+    end
+
+    if msg == "options" or msg == "config" or msg == "settings" then
+        SST_ToggleSettingsFrame(true)
+        return
+    end
+
+    if msg == "button reset" or msg == "button center" then
+        SST_ResetButtonPosition()
+        SST_Print("launcher button reset near the minimap.")
+        return
+    end
+
+    if msg == "button show" then
+        SoulstoneTrackerDB.buttonVisible = true
+        SST_ApplyButtonState()
+        SST_Print("launcher button shown.")
+        return
+    end
+
+    if msg == "button hide" then
+        SoulstoneTrackerDB.buttonVisible = false
+        SST_ApplyButtonState()
+        SST_Print("launcher button hidden. Use /sst button show to restore it.")
+        return
+    end
+
+    if msg == "announce on" then
+        SoulstoneTrackerDB.announceEnabled = true
+        if SST_RefreshSettingsUI then
+            SST_RefreshSettingsUI()
+        end
+        SST_Print("announcements enabled.")
+        return
+    end
+
+    if msg == "announce off" then
+        SoulstoneTrackerDB.announceEnabled = false
+        if SST_RefreshSettingsUI then
+            SST_RefreshSettingsUI()
+        end
+        SST_Print("announcements disabled.")
+        return
+    end
+
+    if msg == "announce test" then
+        SST_SendTestAnnouncement()
+        return
+    end
+
+    local _, _, announceChannel = string.find(msg, "^announce%s+channel%s+([%a_]+)$")
+    if announceChannel then
+        if SST_SetAnnounceChannel(announceChannel) then
+            SST_Print("announcement channel set to " .. SST_GetAnnounceChannelLabel(SoulstoneTrackerDB.announceChannel) .. ".")
+        else
+            SST_Print("unknown announcement channel. Use SMART, SAY, PARTY, RAID, GUILD, YELL, or EMOTE.")
+        end
+        return
+    end
+
+    local _, _, announceText = string.find(message or "", "^announce%s+text%s+(.+)$")
+    if announceText then
+        SoulstoneTrackerDB.announceMessage = announceText
+        if SST_RefreshSettingsUI then
+            SST_RefreshSettingsUI()
+        end
+        SST_Print("announcement text updated.")
         return
     end
 
@@ -1087,6 +2053,8 @@ local function SST_SlashHandler(message)
 end
 
 SST_CreateFrame()
+SST_CreateSettingsFrame()
+SST_CreateMinimapButton()
 SST_HookSpellTargetUnit()
 
 SLASH_SOULSTONETRACKER1 = "/sst"
