@@ -1,5 +1,5 @@
 local SST_ADDON_NAME = "SoulstoneTracker"
-local SST_VERSION = "0.2.0"
+local SST_VERSION = "0.2.1"
 local SST_DURATION_SECONDS = 1800
 local SST_WARN_FIVE_SECONDS = 300
 local SST_WARN_ONE_SECONDS = 60
@@ -38,6 +38,7 @@ local SST_ApplyButtonState = nil
 local SST_SetSettingsTab = nil
 local SST_LastAnnouncementAt = 0
 local SST_LastAnnouncementTarget = nil
+local SST_PositionsReady = false
 
 local SST_SOULSTONE_SPELL_IDS = {
     [20707] = true, -- Minor Soulstone effect
@@ -457,12 +458,19 @@ local function SST_InitDB()
         SoulstoneTrackerDB.settingsTab = "general"
     end
 
+    SoulstoneTrackerDB.x = tonumber(SoulstoneTrackerDB.x)
+    SoulstoneTrackerDB.y = tonumber(SoulstoneTrackerDB.y)
+
+    if not SoulstoneTrackerDB.x or not SoulstoneTrackerDB.y then
+        SoulstoneTrackerDB.x = SST_DEFAULT_X
+        SoulstoneTrackerDB.y = SST_DEFAULT_Y
+    end
+
     if shouldResetButtonPosition or not SoulstoneTrackerDB.buttonX or not SoulstoneTrackerDB.buttonY then
         SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetDefaultButtonPosition()
     end
 
     SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY = SST_GetSafeButtonPosition(SoulstoneTrackerDB.buttonX, SoulstoneTrackerDB.buttonY)
-    SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
     SoulstoneTrackerDB.addonVersion = SST_VERSION
 end
 
@@ -488,10 +496,33 @@ local function SST_ApplyPosition()
     SST_Frame:ClearAllPoints()
 
     if SoulstoneTrackerDB and SoulstoneTrackerDB.x and SoulstoneTrackerDB.y then
-        SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
-        SST_Frame:SetPoint("CENTER", UIParent, "CENTER", SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
+        local x = tonumber(SoulstoneTrackerDB.x)
+        local y = tonumber(SoulstoneTrackerDB.y)
+
+        if not x or not y then
+            x = SST_DEFAULT_X
+            y = SST_DEFAULT_Y
+            SoulstoneTrackerDB.x = x
+            SoulstoneTrackerDB.y = y
+        end
+
+        if SST_PositionsReady then
+            x, y = SST_GetSafePosition(x, y)
+            SoulstoneTrackerDB.x = x
+            SoulstoneTrackerDB.y = y
+        end
+
+        SST_Frame:SetPoint("CENTER", UIParent, "CENTER", x, y)
     else
         SST_Frame:SetPoint("CENTER", UIParent, "CENTER", SST_DEFAULT_X, SST_DEFAULT_Y)
+    end
+end
+
+local function SST_ApplyPositionsAfterLayout()
+    SST_PositionsReady = true
+    SST_ApplyPosition()
+    if SST_ApplyButtonState then
+        SST_ApplyButtonState()
     end
 end
 
@@ -1077,6 +1108,12 @@ local function SST_OnEvent()
         return
     end
 
+    if event == "PLAYER_ENTERING_WORLD" then
+        SST_ApplyPositionsAfterLayout()
+        return
+    end
+
+
     if event == "UNIT_CASTEVENT" then
         SST_OnUnitCastEvent()
         return
@@ -1142,11 +1179,19 @@ local function SST_StopDrag()
         return
     end
 
-    SST_Drag = nil
-
     if SoulstoneTrackerDB then
-        SoulstoneTrackerDB.x, SoulstoneTrackerDB.y = SST_GetSafePosition(SoulstoneTrackerDB.x, SoulstoneTrackerDB.y)
-        SST_ApplyPosition()
+        local x = SoulstoneTrackerDB.x
+        local y = SoulstoneTrackerDB.y
+        local cursorX, cursorY = SST_GetCursorPositionInParent()
+
+        if cursorX and cursorY then
+            x = SST_Drag.startX + (cursorX - SST_Drag.cursorX)
+            y = SST_Drag.startY + (cursorY - SST_Drag.cursorY)
+        end
+
+        x, y = SST_GetSafePosition(x, y)
+        SoulstoneTrackerDB.x = x
+        SoulstoneTrackerDB.y = y
     end
 end
 
@@ -1201,6 +1246,9 @@ function SST_ApplyButtonState()
     if SST_RefreshSettingsUI then
         SST_RefreshSettingsUI()
     end
+
+    SST_Drag = nil
+    SST_ApplyPosition()
 end
 
 local function SST_ResetButtonPosition()
@@ -1834,6 +1882,7 @@ local function SST_CreateFrame()
     SST_CoreFrame:SetScript("OnUpdate", SST_OnUpdate)
 
     SST_CoreFrame:RegisterEvent("ADDON_LOADED")
+    SST_CoreFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
     SST_CoreFrame:RegisterEvent("SPELLCAST_START")
     SST_CoreFrame:RegisterEvent("SPELLCAST_STOP")
     SST_CoreFrame:RegisterEvent("SPELLCAST_FAILED")
